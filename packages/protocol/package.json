@@ -1,0 +1,52 @@
+{
+  "name": "aimc-protocol",
+  "version": "1.0.0",
+  "description": "The aimc host agent protocol (version 1): every message between a server and a host agent, as zod schemas",
+  "keywords": [
+    "ollama",
+    "gpu",
+    "protocol",
+    "zod",
+    "sse"
+  ],
+  "license": "MIT",
+  "homepage": "https://github.com/alkapa-com/aimc-host/tree/main/packages/protocol#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/alkapa-com/aimc-host.git",
+    "directory": "packages/protocol"
+  },
+  "bugs": {
+    "url": "https://github.com/alkapa-com/aimc-host/issues"
+  },
+  "author": "alkapa.com <info@alkapa.com>",
+  "type": "module",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "exports": {
+    "./agent": {
+      "aimc-source": "./src/agent.ts",
+      "types": "./dist/agent.d.ts",
+      "default": "./dist/agent.js"
+    },
+    "./sse": {
+      "aimc-source": "./src/sse.ts",
+      "types": "./dist/sse.d.ts",
+      "default": "./dist/sse.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "src",
+    "!src/**/*.test.ts"
+  ],
+  "scripts": {
+    "build": "node ../../scripts/clean.mjs dist && tsc -p tsconfig.build.json",
+    "prepack": "npm run build"
+  },
+  "dependencies": {
+    "zod": "4.6.7"
+  }
+}

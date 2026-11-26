@@ -1,0 +1,24 @@
+{
+  "name": "aimc-host-workspace",
+  "private": true,
+  "description": "The aimc host agent and its protocol: npm workspaces, published as aimc-host and aimc-protocol",
+  "type": "module",
+  "workspaces": [
+    "packages/protocol",
+    "packages/host"
+  ],
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "build": "npm run build -w aimc-protocol && npm run build -w aimc-host",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "agent": "node scripts/dev.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "typescript": "5.9.3",
+    "vitest": "5.1.0"
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "name": "aimc-host",
+  "version": "0.2.0",
+  "description": "Lend your GPU: connects your local Ollama to an aimc server. Outgoing HTTPS only, no open ports",
+  "keywords": [
+    "ollama",
+    "gpu",
+    "llm",
+    "host",
+    "agent",
+    "cli"
+  ],
+  "license": "MIT",
+  "homepage": "https://github.com/alkapa-com/aimc-host/tree/main/packages/host#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/alkapa-com/aimc-host.git",
+    "directory": "packages/host"
+  },
+  "bugs": {
+    "url": "https://github.com/alkapa-com/aimc-host/issues"
+  },
+  "author": "alkapa.com <info@alkapa.com>",
+  "type": "module",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "bin": {
+    "aimc-host": "dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "node ../../scripts/clean.mjs dist && tsc -p tsconfig.build.json",
+    "prepack": "npm run build"
+  },
+  "dependencies": {
+    "aimc-protocol": "1.0.0",
+    "zod": "4.6.7"
+  }
+}

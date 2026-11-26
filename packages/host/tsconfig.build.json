@@ -1,0 +1,12 @@
+{
+  // Emits dist/*.js. Types of aimc-protocol come from its source ("aimc-source"), so the
+  // protocol needn't be built first; the emitted imports stay `aimc-protocol/...`.
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    "customConditions": ["aimc-source"]
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["src/**/*.test.ts", "src/fake-fetch.ts"]
+}

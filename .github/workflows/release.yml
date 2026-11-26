@@ -1,0 +1,41 @@
+name: Release
+
+# Publishes to npm every package whose version isn't there yet, with provenance (npm shows
+# that the package was built here, from this commit).
+#
+# How to release: bump "version" in packages/*/package.json (and CHANGELOG.md), merge to main,
+# then create a GitHub release (tag v<host version>), or run this workflow by hand.
+#
+# Authentication: npm trusted publishing (OIDC), no token stored. Before a package exists on
+# npm, trusted publishing can't be set up for it; for that first release only, add a short-lived
+# granular npm token as the secret NPM_TOKEN, then delete it.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # npm provenance and trusted publishing
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: npm
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      # Trusted publishing needs npm 11.5.1 or newer.
+      - run: npm install -g npm@11.6.2
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - run: node scripts/smoke.mjs
+      - run: node scripts/publish.mjs
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

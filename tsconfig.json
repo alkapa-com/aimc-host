@@ -1,0 +1,10 @@
+{
+  // Type-checks everything (sources, tests, configs) without building: the host sees the
+  // protocol's TypeScript source through the "aimc-source" export condition.
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "customConditions": ["aimc-source"]
+  },
+  "include": ["packages/*/src/**/*.ts", "vitest.config.ts"]
+}
