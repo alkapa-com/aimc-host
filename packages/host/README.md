@@ -113,8 +113,28 @@ old), the agent exits with code 3 and the service doesn't restart it; the log sa
 
 ### Windows
 
-Keep `aimc-host start` running in a terminal. To start it at login, put a shortcut to
-`aimc-host start` in your Startup folder (Win+R, `shell:startup`).
+Sign in, register and choose models first (above). Then, in a normal terminal:
+
+```powershell
+aimc-host install-service
+```
+
+It creates the Task Scheduler task `aimc-host` for your account and starts the agent. From then
+on the agent starts by itself when you log in (a console window flashes for a moment), runs
+hidden with your settings and sign-in while you are logged in, and is started again 30 s after a
+crash. Its output goes to `agent.log` in your settings folder. Until Ollama runs, it waits.
+
+`aimc-host start`, `stop` and `status` work as on Linux. `aimc-host install-service --dry-run`
+shows what it would do; `aimc-host uninstall-service` removes the task. No administrator rights
+are needed; if a company policy forbids creating tasks, the agent says to run the command in an
+administrator terminal. Run `install-service` again after switching Node versions (it records
+which `node.exe` to use).
+
+Why at log-in, not at boot: Ollama on Windows runs while you are logged in, and Windows can't run
+"whether logged in or not" tasks for Microsoft Entra ID (work) accounts.
+
+Without the service, keep `aimc-host start` running in a terminal (or put a shortcut to
+`cmd.exe /k aimc-host.cmd start` in your Startup folder, Win+R `shell:startup`).
 
 If PowerShell says *running scripts is disabled on this system*, run `aimc-host.cmd` instead
 of `aimc-host`, or allow signed scripts for your user:
@@ -126,9 +146,9 @@ of `aimc-host`, or allow signed scripts for your user:
 npm install -g aimc-host@latest
 ```
 
-Then restart the agent (`aimc-host stop`, then `aimc-host start`). As a service, run
-`aimc-host install-service` again (it replaces the copy and restarts the service). Your sign-in
-and settings stay.
+Then restart the agent (`aimc-host stop`, then `aimc-host start`). As a Linux service, run
+`aimc-host install-service` again (it replaces the copy and restarts the service); as a Windows
+task, `aimc-host stop`, then `aimc-host start`. Your sign-in and settings stay.
 
 When the server recommends a newer agent, the agent says so once, with the command to run. When
 the server needs a newer one, the agent stops and says which version.

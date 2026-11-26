@@ -1,5 +1,17 @@
 # Changelog
 
+## aimc-host 0.4.0 (2026-11-26)
+
+- Windows: `install-service` creates the Task Scheduler task `aimc-host`, which starts the agent
+  hidden when you log in; a supervisor starts it again after a crash, and its output goes to
+  `agent.log` in the settings folder. `uninstall-service` removes the task. `start`, `stop` and
+  `status` handle it like the Linux service. No administrator rights needed; if a policy refuses,
+  the agent says to use an administrator terminal.
+- `start` and `install-service` check that the agent really started, and show the log if not.
+- As a service (Linux and Windows), the agent waits for Ollama instead of exiting when Ollama
+  isn't running yet.
+- A second copy refused on this machine exits with code 4 (was 1).
+
 ## aimc-host 0.3.0, aimc-protocol 1.1.0 (2026-11-26)
 
 aimc-host:

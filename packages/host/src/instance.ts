@@ -12,7 +12,7 @@ import { join } from "node:path";
 //
 // No secrets in here: pid, run id, host id, state, times.
 
-export type RunState = "starting" | "connected" | "reconnecting" | "waiting_for_approval" | "paused" | "blocked" | "stopping";
+export type RunState = "starting" | "waiting_for_ollama" | "connected" | "reconnecting" | "waiting_for_approval" | "paused" | "blocked" | "stopping";
 export type RunMode = "terminal" | "service";
 
 export interface RunInfo {
@@ -47,7 +47,7 @@ export class AlreadyRunningError extends Error {
   }
 }
 
-function pidAlive(pid: number): boolean {
+export function pidAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;
@@ -113,6 +113,7 @@ export function describeRun(info: RunInfo, now = Date.now()): string {
 
 const STATE_TEXT: Record<RunState, string> = {
   starting: "starting",
+  waiting_for_ollama: "waiting for Ollama to start",
   connected: "connected, taking jobs",
   reconnecting: "reconnecting",
   waiting_for_approval: "waiting for an admin to approve this host",

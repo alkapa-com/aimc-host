@@ -2,10 +2,11 @@
 import { PROTOCOL_VERSION } from "aimc-protocol/agent";
 import { randomUUID } from "node:crypto";
 import { accessSync, constants } from "node:fs";
+import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { deviceLogin, fetchServerConfig, logout, NotSignedInError, readTokenClaims, tokenProblems, TokenSource } from "./auth.ts";
 import { AgentFiles, agentConfig, checkOllamaUrl, checkServerUrl, type AgentConfig } from "./config.ts";
-import { AlreadyRunningError, describeRun, describeState, liveRun, readRun, RunFile, stopRun, type RunInfo } from "./instance.ts";
+import { AlreadyRunningError, describeRun, describeState, liveRun, pidAlive, RunFile, stopRun, type RunInfo } from "./instance.ts";
 import { machineId } from "./machine.ts";
 import { OllamaClient } from "./ollama.ts";
 import { FatalError, Runner } from "./runner.ts";
@@ -20,8 +21,10 @@ import {
   SERVICE_RUN_DIR,
   uninstallService,
 } from "./service.ts";
+import { claimSupervisor, closeLog, liveSupervisor, LOG_FILE, logTail, openLog, releaseSupervisor, spawnAgent, stamp, startDetachedSupervisor, supervise } from "./supervisor.ts";
 import { readGpu } from "./telemetry.ts";
 import { AGENT_VERSION, PACKAGE_NAME, runsAsService } from "./version.ts";
+import { currentUser, deleteTask, registerTask, TASK_NAME, taskArguments, taskInputs, taskState } from "./windows-service.ts";
 
 // aimc-host: lend your GPU to an aimc server. Run: aimc-host <command> (or npx aimc-host ...).
 
@@ -50,18 +53,19 @@ Usage: ${RUN} <command> [options]
 
 One copy of the agent runs per host: a second \`start\` is refused.
 
-Linux (systemd), asks for sudo:
+As a service (Linux: systemd, asks for sudo; Windows: a task that starts it hidden at log-in):
   install-service           run the agent as a service, started at boot
-      --copy-settings         bring your sign-in and settings to the service
+      --copy-settings         Linux: bring your sign-in and settings to the service
       --no-start              install and enable, but don't (re)start it
       --dry-run               only show what it would do
-  service <command>         run a command as the service, e.g. service status
-  uninstall-service         remove the service (--purge: its sign-in and settings too)
+  service <command>         Linux: run a command as the service, e.g. service status
+  uninstall-service         remove the service (Linux --purge: its sign-in and settings too)
 
 Settings and the sign-in live in ${new AgentFiles().dir}
 The sign-in file (credentials.json) is a secret: anyone with it can act as this host.`;
 
-const log = (message: string) => console.log(`${new Date().toISOString().slice(11, 19)} ${message}`);
+// With dates in agent.log (the Windows service); the terminal and the journal need only the time.
+const log = (message: string) => console.log(`${process.env.AIMC_LOG_DATES ? stamp() : new Date().toISOString().slice(11, 19)} ${message}`);
 
 /** Where the running agent keeps run.json: the service's /run folder, else the settings folder. */
 function runDir(files: AgentFiles, asService: boolean): string {
@@ -76,24 +80,154 @@ function runDir(files: AgentFiles, asService: boolean): string {
   return files.dir;
 }
 
-/** The installed Linux service's run, if it runs: from its run.json, or just systemd's word. */
-async function serviceRun(): Promise<{ state: string | null; run: RunInfo | null }> {
-  if (!linuxServiceInstalled()) return { state: null, run: null };
-  const state = linuxServiceState();
-  return { state, run: state === "active" ? await liveRun(SERVICE_RUN_DIR) : null };
+interface InstalledService {
+  kind: "systemd" | "task";
+  /** systemd's word (active, inactive...) or Task Scheduler's (Ready, Running...). */
+  state: string;
+  running: boolean;
+  /** Its run.json, while the agent runs. */
+  run: RunInfo | null;
+  runDir: string;
+  /** Where its output goes. */
+  log: string;
 }
 
-/** Waits a few seconds for the service's run.json, to say how it is doing. */
-async function reportServiceStart(): Promise<void> {
-  for (let i = 0; i < 20; i++) {
-    const run = await readRun(SERVICE_RUN_DIR);
-    if (run && run.state !== "starting") {
-      console.log(`Running ${describeRun(run)}: ${describeState(run)}.`);
-      return;
-    }
-    await new Promise((r) => setTimeout(r, 500));
+/** The installed service (Linux unit or Windows task), if there is one. */
+async function installedService(files: AgentFiles): Promise<InstalledService | null> {
+  if (process.platform === "linux" && linuxServiceInstalled()) {
+    const state = linuxServiceState() ?? "unknown";
+    const running = state === "active";
+    return { kind: "systemd", state, running, run: running ? await liveRun(SERVICE_RUN_DIR) : null, runDir: SERVICE_RUN_DIR, log: `journalctl -u ${SERVICE_NAME} -f` };
   }
-  console.log(`Started the service. Check it: ${RUN} status (its log: journalctl -u ${SERVICE_NAME} -f)`);
+  if (process.platform === "win32") {
+    const state = taskState();
+    if (!state) return null;
+    const live = await liveRun(files.dir);
+    const run = live?.mode === "service" ? live : null;
+    // The task itself only starts the hidden supervisor and ends ("Ready"): the agent's run.json
+    // says whether it runs.
+    return { kind: "task", state, running: run !== null, run, runDir: files.dir, log: join(files.dir, LOG_FILE) };
+  }
+  return null;
+}
+
+function startService(service: InstalledService): void {
+  if (service.kind === "systemd") controlLinuxService("start");
+  else startDetachedSupervisor(); // what the task does at log-in
+}
+
+/** Waits for the service's run.json, to say how it is doing, or why it didn't start. Returns the exit code. */
+async function reportServiceStart(service: InstalledService): Promise<number> {
+  for (let i = 0; i < 40; i++) {
+    await new Promise((r) => setTimeout(r, 500));
+    const run = await liveRun(service.runDir);
+    if (run && run.mode === "service" && run.state !== "starting") {
+      console.log(`Running ${describeRun(run)}: ${describeState(run)}.`);
+      return 0;
+    }
+  }
+  if (service.kind === "systemd") {
+    console.log(`Started the service, but it hasn't said how it is doing yet. Check it: ${RUN} status (its log: ${service.log})`);
+    return 0;
+  }
+  console.error(`The agent didn't start within 20 s. The last lines of ${service.log}:\n${logTail(service.runDir)}`);
+  return 1;
+}
+
+/** What the Windows task starts (hidden): the agent, restarted after a crash, output in agent.log. */
+async function superviseWindows(files: AgentFiles): Promise<number> {
+  const logFile = openLog(files.dir);
+  try {
+    if (!claimSupervisor(files.dir, pidAlive)) {
+      logFile.write("Supervisor: another supervisor already runs the agent; this one ends.");
+      return 0;
+    }
+    logFile.write(`Supervisor: ${PACKAGE_NAME} ${AGENT_VERSION} (pid ${process.pid}) starts the agent.`);
+    await supervise({ runAgent: () => spawnAgent(logFile.fd, ["start", "--service"]), log: logFile.write });
+    return 0;
+  } finally {
+    releaseSupervisor(files.dir);
+    closeLog(logFile.fd);
+  }
+}
+
+/** Can the service start? Signed in, registered and models chosen, in these settings. */
+async function settingsMissing(files: AgentFiles, config: AgentConfig): Promise<string[]> {
+  const missing: string[] = [];
+  if (!config.serverUrl || !(await files.loadCredentials())) missing.push(`${RUN} login --server https://your-server.example`);
+  if (!config.hostId) missing.push(`${RUN} register --name <a name for this machine>`);
+  if (config.models.length === 0) missing.push(`${RUN} config --models <models, comma-separated>`);
+  return missing;
+}
+
+async function installWindowsService(files: AgentFiles, config: AgentConfig, o: { dryRun: boolean; noStart: boolean }): Promise<number> {
+  const inputs = taskInputs(files.dir);
+  const user = currentUser();
+  const logPath = join(files.dir, LOG_FILE);
+  if (o.dryRun) {
+    console.log(`install-service would:
+  1. create the Windows task "${TASK_NAME}" (Task Scheduler), replacing an older one:
+       runs as ${user} when ${user} logs in (after 30 s)
+       runs: "${inputs.nodePath}" ${taskArguments(inputs)}
+       in:   ${inputs.workDir}
+     It starts the agent hidden (a console window flashes for a moment) and ends.
+  2. ${o.noStart ? "not start the agent now (--no-start)" : "start the agent now, the same way"}
+The agent then runs with your settings and sign-in (${files.dir}) while you are logged in,
+writes its log to ${logPath}, and is started again 30 s after a crash.
+Remove it with: ${RUN} uninstall-service`);
+    return 0;
+  }
+  const missing = await settingsMissing(files, config);
+  if (missing.length) {
+    throw new Error(`The service would run as ${user}, with the settings in ${files.dir}, but they aren't ready. Do these first:\n  ${missing.join("\n  ")}`);
+  }
+  registerTask(inputs); // AdminRequiredError if a policy forbids it
+  console.log(`Created the Windows task "${TASK_NAME}": starts the agent hidden when ${user} logs in; restarted after a crash. Log: ${logPath}`);
+  if (o.noStart) {
+    console.log(`Start it now with: ${RUN} start`);
+    return 0;
+  }
+  const running = await liveRun(files.dir);
+  if (running?.mode === "terminal") {
+    console.log(`The agent runs in a terminal now (pid ${running.pid}). The task takes over at the next log-in, or now: ${RUN} stop, then ${RUN} start`);
+    return 0;
+  }
+  if (running) await stopRun(files.dir); // an older version as the service: restart it
+  startDetachedSupervisor();
+  const service = await installedService(files);
+  return service ? reportServiceStart(service) : 0;
+}
+
+async function uninstallWindowsService(files: AgentFiles, o: { dryRun: boolean }): Promise<number> {
+  if (o.dryRun) {
+    console.log(`uninstall-service would delete the Windows task "${TASK_NAME}" and stop the agent it runs. Your settings, sign-in and log stay in ${files.dir}.`);
+    return 0;
+  }
+  if (!taskState()) {
+    console.log(`There is no Windows task "${TASK_NAME}".`);
+    return 0;
+  }
+  deleteTask(); // AdminRequiredError if a policy forbids it
+  await stopWindowsService(files);
+  console.log(`Removed the Windows task "${TASK_NAME}". Your settings, sign-in and log stay in ${files.dir} (${RUN} logout signs out).`);
+  return 0;
+}
+
+/** Stops the agent the task started, and its supervisor. True when something was running. */
+async function stopWindowsService(files: AgentFiles): Promise<boolean> {
+  const running = await liveRun(files.dir);
+  const stopped = running?.mode === "service" ? await stopRun(files.dir) : false; // the supervisor ends with it
+  const supervisor = liveSupervisor(files.dir, pidAlive);
+  if (supervisor) {
+    // Still there: it was waiting to start the agent again after a crash.
+    await new Promise((r) => setTimeout(r, 1000));
+    if (liveSupervisor(files.dir, pidAlive)) {
+      process.kill(supervisor);
+      if (!stopped) console.log("Stopped the service's supervisor.");
+      return true;
+    }
+  }
+  return stopped;
 }
 
 function requireServer(config: AgentConfig): string {
@@ -102,14 +236,7 @@ function requireServer(config: AgentConfig): string {
 }
 
 /** `start`, once this run holds the run folder: the agent until Ctrl+C, `stop` or a fatal error. */
-async function runAgent(server: string, config: AgentConfig, hostId: string, files: AgentFiles, run: RunFile, runId: string): Promise<number> {
-  const ollama = new OllamaClient(fetch, config.ollamaUrl);
-  const installed = await ollama.installed().catch((err: Error) => {
-    throw new Error(`${err.message} Is Ollama running?`);
-  });
-  const missing = config.models.filter((m) => !installed.includes(m));
-  if (missing.length) log(`Warning: offered but not installed in Ollama: ${missing.join(", ")}. Jobs for them will fail.`);
-
+async function runAgent(server: string, config: AgentConfig, hostId: string, files: AgentFiles, run: RunFile, runId: string, asService: boolean): Promise<number> {
   const stop = new AbortController();
   const onStop = (why: string) => {
     if (stop.signal.aborted) return;
@@ -120,6 +247,30 @@ async function runAgent(server: string, config: AgentConfig, hostId: string, fil
   process.once("SIGINT", () => onStop("Ctrl+C"));
   process.once("SIGTERM", () => onStop("asked to stop"));
   run.watchStop(() => onStop(`${RUN} stop`));
+
+  const ollama = new OllamaClient(fetch, config.ollamaUrl);
+  let installed: string[] | null = null;
+  while (!installed) {
+    try {
+      installed = await ollama.installed();
+    } catch (err) {
+      // In a terminal, say so and stop. As a service (started at boot, maybe before Ollama,
+      // which on Windows starts when you log in), wait for it.
+      if (!asService) throw new Error(`${(err as Error).message} Is Ollama running?`);
+      if (run.current.state !== "waiting_for_ollama") log(`Waiting for Ollama at ${config.ollamaUrl} (${(err as Error).message}); checking every 30 s.`);
+      run.update("waiting_for_ollama");
+      await new Promise<void>((resolve) => {
+        const t = setTimeout(resolve, 30_000);
+        stop.signal.addEventListener("abort", () => (clearTimeout(t), resolve()), { once: true });
+      });
+      if (stop.signal.aborted) {
+        log("Stopped.");
+        return 0;
+      }
+    }
+  }
+  const missing = config.models.filter((m) => !installed.includes(m));
+  if (missing.length) log(`Warning: offered but not installed in Ollama: ${missing.join(", ")}. Jobs for them will fail.`);
   log(`Starting host ${hostId} against ${server}.`);
   await new Runner({
     server: new ServerClient(fetch, server, new TokenSource(fetch, files), runId),
@@ -264,20 +415,27 @@ async function main(argv: string[]): Promise<number> {
     case "start": {
       const asService = Boolean(values.service) || runsAsService();
       if (asService) process.env.AIMC_SERVICE = "1";
-      const service = await serviceRun();
+      // Windows: the task runs `start --service`, which starts the hidden supervisor and ends;
+      // the supervisor starts the agent (this command, once more) and starts it again after a crash.
+      if (asService && process.platform === "win32" && !process.env.AIMC_SUPERVISED) {
+        if (process.env.AIMC_DETACHED) return superviseWindows(files);
+        startDetachedSupervisor();
+        return 0;
+      }
+      const service = asService ? null : await installedService(files);
 
       // The service is installed: `start` starts it (unless asked to run here).
-      if (service.state && !asService && !values.foreground) {
-        if (service.state === "active") {
+      if (service && !values.foreground) {
+        if (service.running) {
           console.log(service.run ? `Already running ${describeRun(service.run)}: ${describeState(service.run)}.` : "The service is already running.");
           return 0;
         }
-        controlLinuxService("start");
-        await reportServiceStart();
-        return 0;
+        if (service.kind === "task") await stopWindowsService(files); // a supervisor waiting after a crash: start afresh
+        startService(service);
+        return reportServiceStart(service);
       }
-      // One copy per host: not next to the running service.
-      if (!asService && service.state === "active" && (!service.run || service.run.hostId === config.hostId)) {
+      // One copy per host: not next to the running Linux service (on Windows run.json says it).
+      if (service?.kind === "systemd" && service.running && (!service.run || service.run.hostId === config.hostId)) {
         throw new Error(`The service is already running this host${service.run ? ` (${describeRun(service.run)})` : ""}. Stop it first: ${RUN} stop`);
       }
 
@@ -295,43 +453,58 @@ async function main(argv: string[]): Promise<number> {
           version: AGENT_VERSION,
         });
       } catch (err) {
-        if (err instanceof AlreadyRunningError) throw new Error(`The agent is already running (${describeRun(err.info)}): ${describeState(err.info)}. Stop it first: ${RUN} stop`);
+        if (err instanceof AlreadyRunningError) {
+          console.error(`The agent is already running (${describeRun(err.info)}): ${describeState(err.info)}. Stop it first: ${RUN} stop`);
+          return 4; // the Windows supervisor stops on this instead of retrying
+        }
         throw err;
       }
       try {
-        return await runAgent(server, config, config.hostId, files, run, runId);
+        return await runAgent(server, config, config.hostId, files, run, runId, asService);
       } finally {
         await run.release();
       }
     }
 
     case "stop": {
-      const service = await serviceRun();
-      if (service.state === "active" || service.state === "activating" || service.state === "reloading") {
-        controlLinuxService("stop");
-        console.log("Stopped the service. It starts again at boot; start it now with: " + `${RUN} start`);
-        return 0;
+      const service = await installedService(files);
+      if (service?.kind === "systemd") {
+        if (["active", "activating", "reloading"].includes(service.state)) {
+          controlLinuxService("stop");
+          console.log(`Stopped the service. It starts again at boot; start it now with: ${RUN} start`);
+          return 0;
+        }
       }
-      if (await stopRun(files.dir)) return 0;
-      console.log(service.state ? `Not running (the service is ${service.state}).` : "Not running.");
+      if (service?.kind === "task") {
+        if (await stopWindowsService(files)) {
+          console.log(`It starts again when you log in, or now with: ${RUN} start`);
+          return 0;
+        }
+      }
+      if (await stopRun(files.dir)) return 0; // the agent in a terminal
+      console.log(service?.kind === "systemd" ? `Not running (the service is ${service.state}).` : "Not running.");
       return 0;
     }
 
     case "status": {
       const local = await liveRun(files.dir);
-      const service = await serviceRun();
+      const service = await installedService(files);
       if (local) {
         console.log(`Running:   yes, ${describeRun(local)}`);
         console.log(`State:     ${describeState(local)}`);
       }
-      if (service.state === "active") {
+      if (service?.kind === "systemd" && service.running) {
         if (service.run) {
           console.log(`Running:   yes, ${describeRun(service.run)}`);
           console.log(`State:     ${describeState(service.run)}`);
         } else console.log("Running:   yes, as the service (no details: reinstall it with install-service to see them)");
       }
-      if (!local && service.state !== "active") console.log(`Running:   no (start it: ${RUN} start)`);
-      if (service.state) console.log(`Service:   installed, ${service.state}; it has its own settings (${RUN} service status)`);
+      if (!local && !(service?.kind === "systemd" && service.running)) {
+        if (service?.kind === "task" && liveSupervisor(files.dir, pidAlive)) console.log(`Running:   no, it starts again shortly after a problem (see ${service.log})`);
+        else console.log(`Running:   no (start it: ${RUN} start)`);
+      }
+      if (service?.kind === "systemd") console.log(`Service:   installed, ${service.state}; it has its own settings (${RUN} service status)`);
+      if (service?.kind === "task") console.log(`Service:   installed (Windows task "${TASK_NAME}", starts it when you log in); log: ${service.log}`);
       console.log(`Agent:     ${PACKAGE_NAME} ${AGENT_VERSION}`);
       console.log(`Settings:  ${files.dir}`);
       console.log(`Server:    ${config.serverUrl ?? "not set"}`);
@@ -381,10 +554,10 @@ async function main(argv: string[]): Promise<number> {
     }
 
     case "install-service":
-      return installService(serviceOptions);
+      return process.platform === "win32" ? installWindowsService(files, config, serviceOptions) : installService(serviceOptions);
 
     case "uninstall-service":
-      return uninstallService(serviceOptions);
+      return process.platform === "win32" ? uninstallWindowsService(files, serviceOptions) : uninstallService(serviceOptions);
 
     case "version":
     case "--version":
