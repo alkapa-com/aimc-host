@@ -76,7 +76,9 @@ describe("one agent per settings folder", () => {
       `import { RunFile } from ${JSON.stringify(pathToFileURL(join(import.meta.dirname, "instance.ts")).href)};
 const run = await RunFile.acquire(process.argv[2], { pid: process.pid, runId: crypto.randomUUID(), mode: "terminal", hostId: "h1", version: "0.3.0" });
 const keepAlive = setInterval(() => {}, 1000);
-run.watchStop(async () => { clearInterval(keepAlive); await run.release(); });
+const stop = async () => { clearInterval(keepAlive); await run.release(); };
+run.watchStop(stop);
+process.once("SIGTERM", stop); // like the agent: Linux stops it with SIGTERM at once
 `,
     );
     const child = spawn(process.execPath, ["--experimental-strip-types", "--no-warnings", script, dir], { stdio: "ignore" });

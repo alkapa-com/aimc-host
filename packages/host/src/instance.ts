@@ -239,6 +239,7 @@ export async function stopRun(dir: string, timeoutMs = 25_000, log: (m: string) 
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 500));
     if (!pidAlive(info.pid)) {
+      await cleanUp(dir, info);
       log("Stopped.");
       return true;
     }
@@ -249,6 +250,12 @@ export async function stopRun(dir: string, timeoutMs = 25_000, log: (m: string) 
   } catch (err) {
     throw new Error(`Couldn't stop pid ${info.pid}: ${(err as Error).message}`);
   }
-  await rm(join(dir, RUN_FILE), { force: true });
+  await cleanUp(dir, info);
   return true;
+}
+
+/** What a stopped agent may have left behind (killed before it could tidy up). */
+async function cleanUp(dir: string, stopped: RunInfo): Promise<void> {
+  if ((await readRun(dir))?.runId === stopped.runId) await rm(join(dir, RUN_FILE), { force: true });
+  await rm(join(dir, STOP_FILE), { force: true });
 }
