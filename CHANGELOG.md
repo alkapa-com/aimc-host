@@ -1,6 +1,6 @@
 # Changelog
 
-## aimc-host 0.3.0, aimc-protocol 1.1.0 (unreleased)
+## aimc-host 0.3.0, aimc-protocol 1.1.0 (2026-11-26)
 
 aimc-host:
 - `status` says first whether the agent runs (in a terminal or as the service, its pid, since
