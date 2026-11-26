@@ -1,6 +1,7 @@
 import { parseStreamEvent, PROTOCOL_VERSION, type AgentJobEvent, type JobEvent } from "aimc-protocol/agent";
 import { readSseData } from "aimc-protocol/sse";
 import { NotSignedInError } from "./auth.ts";
+import type { RunState } from "./instance.ts";
 import { OllamaError, type OllamaClient } from "./ollama.ts";
 import { ServerError, type ServerClient } from "./server-client.ts";
 import type { GpuTelemetry } from "./telemetry.ts";
@@ -51,6 +52,15 @@ export interface RunnerOptions {
   /** Waiting before asking again while the host is pending or paused. */
   idleRetryMs?: number;
   maxBackoffMs?: number;
+  /** Hashed machine id, sent with hello. */
+  machineId?: string;
+  /** What the agent is doing now (for `status`). */
+  onState?: (state: RunState, detail?: string) => void;
+  /** A job finished (any outcome). */
+  onJobDone?: () => void;
+  /** Another copy holds the host: how long to keep checking (it may have just stopped) before giving up. */
+  conflictGraceMs?: number;
+  conflictRetryMs?: number;
 }
 
 const sleep = (ms: number, signal: AbortSignal) =>
@@ -70,6 +80,7 @@ export class Runner {
   private heartbeat: ReturnType<typeof setInterval> | null = null;
   private lastNotice = "";
   private lastUpdateNotice = "";
+  private conflictSince: number | null = null;
 
   constructor(options: RunnerOptions) {
     this.o = options;
@@ -86,10 +97,12 @@ export class Runner {
   async run(): Promise<void> {
     const { signal } = this.o;
     let backoff = 1000;
+    const state = (s: RunState, detail?: string) => this.o.onState?.(s, detail);
     try {
       while (!signal.aborted) {
         try {
           const hello = await this.hello();
+          this.conflictSince = null;
           const advice = versionAdvice(this.o.agentVersion, hello);
           if (advice?.kind === "too_old") throw new FatalError(advice.message);
           if (advice && advice.message !== this.lastUpdateNotice) {
@@ -100,11 +113,13 @@ export class Runner {
           this.limit = hello.maxConcurrent;
           this.startHeartbeat(hello.heartbeatIntervalMs);
           if (hello.status === "pending_approval") {
+            state("waiting_for_approval");
             this.notice("Registered and waiting for an admin to approve this host. Checking again every minute.");
             await sleep(this.o.idleRetryMs ?? 60_000, signal);
             continue;
           }
           if (hello.status === "paused") {
+            state("paused");
             this.notice("This host is paused. Resume it to get jobs again. Checking every minute.");
             await sleep(this.o.idleRetryMs ?? 60_000, signal);
             continue;
@@ -117,13 +132,27 @@ export class Runner {
           if (err instanceof NotSignedInError || err instanceof FatalError) throw err;
           if (err instanceof ServerError) {
             if (FATAL.has(err.code)) throw new FatalError(err.message);
+            if (err.code === "host_already_connected") {
+              // Two copies of one host. Maybe the other one was stopped a moment ago and the
+              // server hasn't noticed yet: keep checking for a minute, then give up.
+              const now = Date.now();
+              this.conflictSince ??= now;
+              const grace = this.o.conflictGraceMs ?? 60_000;
+              if (now - this.conflictSince >= grace) throw new FatalError(err.message);
+              state("blocked");
+              this.notice(`${err.message} Checking again for up to ${Math.round(grace / 1000)} s in case it was just stopped.`);
+              await sleep(this.o.conflictRetryMs ?? 15_000, signal);
+              continue;
+            }
             if (err.code === "host_pending" || err.code === "host_paused") {
+              state(err.code === "host_pending" ? "waiting_for_approval" : "paused");
               this.notice(err.message);
               await sleep(this.o.idleRetryMs ?? 60_000, signal);
               continue;
             }
             if (err.code === "hello_required") continue;
           }
+          state("reconnecting", (err as Error).message);
           this.o.log(`Connection problem: ${(err as Error).message}. Retrying in ${Math.round(backoff / 1000)} s.`);
           await sleep(backoff, signal);
           backoff = Math.min(backoff * 2, this.o.maxBackoffMs ?? 60_000);
@@ -148,6 +177,7 @@ export class Runner {
       maxConcurrent: this.o.maxConcurrent,
       hardware: gpu ? { gpuName: gpu.name, vramMb: gpu.vramTotalMb } : {},
       ...(ollamaVersion ? { ollamaVersion } : {}),
+      ...(this.o.machineId ? { machineId: this.o.machineId } : {}),
     });
   }
 
@@ -182,6 +212,7 @@ export class Runner {
     try {
       const body = await this.o.server.openStream(this.o.hostId, control.signal);
       this.lastNotice = "";
+      this.o.onState?.("connected");
       this.o.log(`Connected. Offering ${this.o.models.join(", ")}; up to ${this.limit} job(s) at once.`);
       for await (const data of readSseData(body)) {
         const event = parseStreamEvent(data);
@@ -218,7 +249,10 @@ export class Runner {
     }
     const entry = { abort: new AbortController(), reason: null as "cancelled" | "deadline" | null };
     this.jobs.set(job.jobId, entry);
-    void this.runJob(job, entry).finally(() => this.jobs.delete(job.jobId));
+    void this.runJob(job, entry).finally(() => {
+      this.jobs.delete(job.jobId);
+      this.o.onJobDone?.();
+    });
   }
 
   private async runJob(job: JobEvent, entry: { abort: AbortController; reason: "cancelled" | "deadline" | null }) {

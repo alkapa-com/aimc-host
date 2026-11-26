@@ -24,6 +24,15 @@ ESM only, Node 22.12 or newer, TypeScript types included.
 Every non-2xx answer is `agentApiError`: `{ error: { code, message } }`, the message written for
 the host's owner.
 
+One copy of the agent per host (1.1): each run of the agent sends a random UUID in the
+`AGENT_RUN_HEADER` (`aimc-run-id`) of its calls. While one run is connected, the server answers
+hello and stream of a different run with 409 `host_already_connected`. The same run reconnecting
+is fine.
+
+One host per machine (1.1): `registerHostRequest.machineId` and `helloRequest.machineId` carry a
+SHA-256 hash of the machine's id (never the id). The server answers a second registration of the
+same machine by the same owner with 409 `machine_already_registered`, unless `force` is set.
+
 ## Compatibility
 
 `PROTOCOL_VERSION` is 1, and version 1 only grows:

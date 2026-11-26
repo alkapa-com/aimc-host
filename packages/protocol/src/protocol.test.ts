@@ -76,6 +76,11 @@ describe("agent protocol", () => {
     expect(registerHostRequest.parse({ name: "  alex-desktop " })).toEqual({ name: "alex-desktop" });
     expect(registerHostRequest.safeParse({ name: "<script>" }).success).toBe(false);
     expect(registerHostRequest.safeParse({ name: "" }).success).toBe(false);
+    const machineId = "a".repeat(64);
+    expect(registerHostRequest.parse({ name: "pc", machineId, force: true })).toEqual({ name: "pc", machineId, force: true });
+    // Only a hash: never a raw machine id.
+    expect(registerHostRequest.safeParse({ name: "pc", machineId: "4c4c4544-0042-3510-8051-b4c04f4e3132" }).success).toBe(false);
+    expect(helloRequest.parse({ protocolVersion: 1, agentVersion: "0.3.0", offeredModels: [], machineId }).machineId).toBe(machineId);
   });
 
   it("reads SSE data cut at any byte, skipping comments and non-JSON", async () => {

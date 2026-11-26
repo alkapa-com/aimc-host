@@ -1,6 +1,6 @@
 {
   "name": "aimc-protocol",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "The aimc host agent protocol (version 1): every message between a server and a host agent, as zod schemas",
   "keywords": [
     "ollama",

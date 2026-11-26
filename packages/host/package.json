@@ -1,6 +1,6 @@
 {
   "name": "aimc-host",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Lend your GPU: connects your local Ollama to an aimc server. Outgoing HTTPS only, no open ports",
   "keywords": [
     "ollama",
@@ -36,7 +36,7 @@
     "prepack": "npm run build"
   },
   "dependencies": {
-    "aimc-protocol": "1.0.0",
+    "aimc-protocol": "1.1.0",
     "zod": "4.6.7"
   }
 }

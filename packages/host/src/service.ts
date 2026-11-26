@@ -22,6 +22,8 @@ export const SERVICE_NAME = "ai-my-card-host-agent";
 export const SERVICE_USER = "ai-my-card-host";
 export const STATE_DIR = "/var/lib/ai-my-card-host";
 export const INSTALL_DIR = "/opt/aimc-host";
+/** The service's run.json (whether it runs, what it does; no secrets), readable by everyone so `status` works without sudo. */
+export const SERVICE_RUN_DIR = "/run/ai-my-card-host";
 export const UNIT_PATH = `/etc/systemd/system/${SERVICE_NAME}.service`;
 /** Written by install-service: which Node and which agent the service runs. */
 const INSTALL_INFO = join(INSTALL_DIR, "install.json");
@@ -60,7 +62,8 @@ User=${SERVICE_USER}
 Group=${SERVICE_USER}
 WorkingDirectory=${INSTALL_DIR}
 Environment=XDG_CONFIG_HOME=${STATE_DIR}
-ExecStart=${nodePath} ${cliPath} start
+Environment=AIMC_SERVICE=1
+ExecStart=${nodePath} ${cliPath} start --service
 Restart=on-failure
 RestartSec=30
 RestartPreventExitStatus=3
@@ -70,6 +73,9 @@ TimeoutStopSec=20
 # Hardening: it only needs the network, Ollama, nvidia-smi and its own folder.
 StateDirectory=ai-my-card-host
 StateDirectoryMode=0700
+# ${SERVICE_RUN_DIR}/run.json: whether it runs and what it does (no secrets), for \`${PACKAGE_NAME} status\`.
+RuntimeDirectory=ai-my-card-host
+RuntimeDirectoryMode=0755
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
@@ -154,7 +160,7 @@ function isRoot(): boolean {
 function requireLinux(command: string) {
   if (process.platform !== "linux") {
     throw new Error(
-      `${command} is for Linux with systemd. On Windows, keep \`${PACKAGE_NAME} start\` running in a terminal, or start it at login with a shortcut in your Startup folder.`,
+      `${command} is for Linux with systemd. On Windows, keep \`${PACKAGE_NAME} start\` running in a terminal.`,
     );
   }
   if (!existsSync("/run/systemd/system")) throw new Error(`${command} needs systemd, which isn't running on this machine.`);
@@ -302,8 +308,7 @@ The unit:
     return 0;
   }
   run("systemctl", ["restart", SERVICE_NAME]);
-  console.log(`Started. Its log: journalctl -u ${SERVICE_NAME} -f`);
-  console.log(`Don't also run \`${PACKAGE_NAME} start\` for the same host elsewhere: one connection per host.`);
+  console.log(`Started. Check it: ${PACKAGE_NAME} status. Its log: journalctl -u ${SERVICE_NAME} -f`);
   return 0;
 }
 
@@ -335,8 +340,8 @@ export async function uninstallService(o: ServiceOptions): Promise<number> {
  */
 export async function runAsService(args: string[]): Promise<number> {
   requireLinux("service");
-  if (args[0] === "start") {
-    throw new Error(`The service runs the agent itself: sudo systemctl start ${SERVICE_NAME} (log: journalctl -u ${SERVICE_NAME} -f).`);
+  if (args[0] === "start" || args[0] === "stop") {
+    throw new Error(`To ${args[0]} the service: ${PACKAGE_NAME} ${args[0]} (its log: journalctl -u ${SERVICE_NAME} -f).`);
   }
   if (!isRoot()) return elevate(["service", ...args]);
   let info: { nodePath: string; cliPath: string };
@@ -363,4 +368,30 @@ export async function runAsService(args: string[]): Promise<number> {
   });
   if (result.error) throw new Error(`Couldn't run the agent as ${SERVICE_USER}: ${result.error.message}`);
   return result.status ?? 1;
+}
+
+// ---- start, stop and state of the installed Linux service --------------------------------
+
+export function linuxServiceInstalled(): boolean {
+  return process.platform === "linux" && existsSync(UNIT_PATH);
+}
+
+/** systemd's word for it: active, inactive, failed, activating... Null without systemd. */
+export function linuxServiceState(): string | null {
+  if (process.platform !== "linux" || !existsSync("/run/systemd/system")) return null;
+  try {
+    return run("systemctl", ["is-active", SERVICE_NAME]);
+  } catch (err) {
+    // is-active exits non-zero for anything but "active", and still prints the state.
+    const out = (err as { stdout?: unknown }).stdout;
+    return typeof out === "string" && out.trim() ? out.trim() : null;
+  }
+}
+
+/** `systemctl start|stop` the service, through sudo unless already root. */
+export function controlLinuxService(action: "start" | "stop"): void {
+  const args = [action, SERVICE_NAME];
+  const result = isRoot() ? spawnSync("systemctl", args, { stdio: "inherit" }) : spawnSync("sudo", ["systemctl", ...args], { stdio: "inherit" });
+  if (result.error) throw new Error(`Couldn't run systemctl: ${result.error.message}`);
+  if (result.status !== 0) throw new Error(`systemctl ${action} ${SERVICE_NAME} failed (exit ${result.status}). Its log: journalctl -u ${SERVICE_NAME} -n 50`);
 }

@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { TokenSource } from "./auth.ts";
 import { controlledStream, fakeFetch, json } from "./fake-fetch.ts";
 import { OllamaClient } from "./ollama.ts";
-import { FatalError, Runner } from "./runner.ts";
+import { FatalError, Runner, type RunnerOptions } from "./runner.ts";
 import { ServerClient } from "./server-client.ts";
 
 // `start` against a fake aimc server and a fake Ollama.
@@ -14,7 +14,16 @@ const tokens = { get: async () => "access-token", invalidate() {} } as unknown a
 
 type Stream = ReturnType<typeof controlledStream>;
 
-function setup(opts: { hello?: (number | "pending_approval" | "active" | "paused" | { status: number; code: string })[]; models?: string[]; maxConcurrent?: number; helloExtra?: Record<string, unknown> } = {}) {
+function setup(
+  opts: {
+    hello?: (number | "pending_approval" | "active" | "paused" | { status: number; code: string })[];
+    models?: string[];
+    maxConcurrent?: number;
+    helloExtra?: Record<string, unknown>;
+    runId?: string;
+    runner?: Partial<RunnerOptions>;
+  } = {},
+) {
   const helloAnswers = opts.hello ?? ["active"];
   const state = {
     helloCalls: 0,
@@ -65,7 +74,7 @@ function setup(opts: { hello?: (number | "pending_approval" | "active" | "paused
   });
   const stop = new AbortController();
   const runner = new Runner({
-    server: new ServerClient(server.fetch, "https://aimc.test", tokens),
+    server: new ServerClient(server.fetch, "https://aimc.test", tokens, opts.runId),
     ollama: new OllamaClient(ollama.fetch, "http://127.0.0.1:11434"),
     hostId: HOST,
     models: opts.models ?? ["gemma3:12b"],
@@ -77,6 +86,7 @@ function setup(opts: { hello?: (number | "pending_approval" | "active" | "paused
     batchMs: 10,
     idleRetryMs: 10,
     maxBackoffMs: 20,
+    ...opts.runner,
   });
   const running = runner.run();
   stops.push(() => stop.abort());
@@ -221,6 +231,50 @@ describe("Runner (start)", () => {
   it("stops when the server refuses an outdated agent", async () => {
     const { running } = setup({ hello: [{ status: 426, code: "agent_outdated" }] });
     await expect(running).rejects.toBeInstanceOf(FatalError);
+  });
+
+  it("says which run it is, sends the machine id and reports its state", async () => {
+    const states: string[] = [];
+    let jobsDone = 0;
+    const runId = "9b1f6a3e-0c4d-4e5f-8a6b-7c8d9e0f1a2b";
+    const { state, server } = setup({
+      hello: ["pending_approval", "active"],
+      runId,
+      runner: { machineId: "d".repeat(64), onState: (s) => states.push(s), onJobDone: () => jobsDone++ },
+    });
+    await until(() => state.streams.length === 1);
+    const hello = server.calls.find((c) => c.url.endsWith("/hello"))!;
+    expect(hello.headers["aimc-run-id"]).toBe(runId);
+    expect(hello.body).toMatchObject({ machineId: "d".repeat(64) });
+    expect(server.calls.find((c) => c.url.endsWith("/stream"))!.headers["aimc-run-id"]).toBe(runId);
+    expect(states).toEqual(["waiting_for_approval", "connected"]);
+
+    send(state.streams[0]!, job());
+    await until(() => state.ollamaStreams.length === 1);
+    state.ollamaStreams[0]!.write('{"done":true,"done_reason":"stop"}\n');
+    state.ollamaStreams[0]!.close();
+    await until(() => jobsDone === 1);
+  });
+
+  it("waits a little when another copy holds the host, then gives up with the server's message", async () => {
+    const states: string[] = [];
+    const { running, state } = setup({
+      hello: [{ status: 409, code: "host_already_connected" }],
+      runner: { conflictGraceMs: 60, conflictRetryMs: 10, onState: (s) => states.push(s) },
+    });
+    await expect(running).rejects.toThrow("refused: host_already_connected");
+    await expect(running).rejects.toBeInstanceOf(FatalError); // exit 3: not restarted into a fight
+    expect(state.helloCalls).toBeGreaterThan(1);
+    expect(states).toContain("blocked");
+    expect(state.logs.filter((l) => l.includes("host_already_connected"))).toHaveLength(1); // said once
+  });
+
+  it("connects when the other copy is gone after all (it was just stopped)", async () => {
+    const { state } = setup({
+      hello: [{ status: 409, code: "host_already_connected" }, "active"],
+      runner: { conflictGraceMs: 10_000, conflictRetryMs: 10 },
+    });
+    await until(() => state.streams.length === 1);
   });
 
   it("retries after connection problems instead of giving up", async () => {

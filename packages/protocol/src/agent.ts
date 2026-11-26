@@ -16,11 +16,19 @@ import { z } from "zod";
 //   POST /api/agent/v1/hosts/{id}/heartbeat            telemetry every 15 s
 //
 // Every non-2xx answer is { error: { code, message } } (agentApiError below).
+//
+// One copy of the agent per host: each run of the agent sends a random run id in the
+// AGENT_RUN_HEADER of hello and stream (protocol 1.1). While one run is connected, the server
+// refuses a different run with 409 host_already_connected. The same run reconnecting is fine.
 
 export const PROTOCOL_VERSION = 1;
 /** The scope an agent asks for: "host" carries the host API audience; offline_access a long-lived refresh token. */
 export const AGENT_SCOPE = "openid offline_access host";
 export const HEARTBEAT_INTERVAL_MS = 15_000;
+/** Request header with this run's id (a random UUID per agent process), on hello and stream. */
+export const AGENT_RUN_HEADER = "aimc-run-id";
+/** A hashed machine id (64 hex chars): the server spots a second registration of one machine. */
+const machineId = z.string().regex(/^[0-9a-f]{64}$/);
 
 /** Ollama-style model names, e.g. "qwen3-vl:8b-instruct" or "library/model:tag". */
 const modelName = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,99}$/);
@@ -42,7 +50,13 @@ export type AgentConfigResponse = z.infer<typeof agentConfigResponse>;
 
 export const HOST_NAME = /^[A-Za-z0-9][A-Za-z0-9 ._-]{0,59}$/;
 
-export const registerHostRequest = z.object({ name: z.string().trim().regex(HOST_NAME) });
+export const registerHostRequest = z.object({
+  name: z.string().trim().regex(HOST_NAME),
+  /** Hash of this machine's id (never the id itself). With it, the server refuses a second host for one machine. */
+  machineId: machineId.optional(),
+  /** Register a new host even if this machine already is one of yours. */
+  force: z.boolean().optional(),
+});
 export type RegisterHostRequest = z.infer<typeof registerHostRequest>;
 
 export const registerHostResponse = z.object({ hostId: z.uuid(), status: z.literal("pending_approval") });
@@ -61,6 +75,8 @@ export const helloRequest = z.object({
     .object({ gpuName: shortText(100).optional(), vramMb: z.number().int().min(0).max(1_000_000).optional() })
     .default({}),
   ollamaVersion: shortText(40).optional(),
+  /** Hash of this machine's id, as in register: lets hosts registered earlier be recognized. */
+  machineId: machineId.optional(),
 });
 export type HelloRequest = z.input<typeof helloRequest>;
 

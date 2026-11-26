@@ -1,4 +1,5 @@
 import {
+  AGENT_RUN_HEADER,
   agentApiError,
   helloResponse,
   jobEventsResponse,
@@ -11,7 +12,8 @@ import {
 import type { FetchFn, TokenSource } from "./auth.ts";
 
 // Calls to the server's agent API. Every call carries a fresh access token; a 401 refreshes the
-// token once and retries (it may have expired a moment ago).
+// token once and retries (it may have expired a moment ago). With a run id, every call says
+// which run of the agent it is (one copy per host: the server refuses a second run).
 
 /** The server answered with an error: a fixed code and a message written for you. */
 export class ServerError extends Error {
@@ -30,11 +32,13 @@ export class ServerClient {
   private readonly fetchFn: FetchFn;
   private readonly serverUrl: string;
   private readonly tokens: TokenSource;
+  private readonly runId: string | undefined;
 
-  constructor(fetchFn: FetchFn, serverUrl: string, tokens: TokenSource) {
+  constructor(fetchFn: FetchFn, serverUrl: string, tokens: TokenSource, runId?: string) {
     this.fetchFn = fetchFn;
     this.serverUrl = serverUrl;
     this.tokens = tokens;
+    this.runId = runId;
   }
 
   private async call(path: string, init: RequestInit, timeoutMs: number | null = 30_000): Promise<Response> {
@@ -42,7 +46,7 @@ export class ServerClient {
       const token = await this.tokens.get();
       const res = await this.fetchFn(`${this.serverUrl}/api/agent/v1${path}`, {
         ...init,
-        headers: { ...(init.headers as Record<string, string>), authorization: `Bearer ${token}` },
+        headers: { ...(init.headers as Record<string, string>), authorization: `Bearer ${token}`, ...(this.runId ? { [AGENT_RUN_HEADER]: this.runId } : {}) },
         ...(timeoutMs !== null && !init.signal ? { signal: AbortSignal.timeout(timeoutMs) } : {}),
       });
       if (res.status === 401 && attempt === 0) {
@@ -69,8 +73,8 @@ export class ServerClient {
     return parse(await res.json());
   }
 
-  register(name: string) {
-    return this.post("/hosts", { name }, (v) => registerHostResponse.parse(v));
+  register(name: string, machineId?: string, force?: boolean) {
+    return this.post("/hosts", { name, ...(machineId ? { machineId } : {}), ...(force ? { force: true } : {}) }, (v) => registerHostResponse.parse(v));
   }
 
   hello(hostId: string, body: HelloRequest): Promise<HelloResponse> {

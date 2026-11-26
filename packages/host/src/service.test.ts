@@ -3,13 +3,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { inHomeFolder, packagesToCopy, renderUnit } from "./service.ts";
-import { compareVersions, updateCommand, versionAdvice } from "./version.ts";
+import { compareVersions, runsAsService, updateCommand, versionAdvice } from "./version.ts";
 
 describe("the systemd unit", () => {
   const unit = renderUnit({ nodePath: "/opt/aimc-host/bin/node", cliPath: "/opt/aimc-host/node_modules/aimc-host/dist/cli.js" });
 
   it("runs the copied agent with the copied node, as the service user", () => {
-    expect(unit).toContain("ExecStart=/opt/aimc-host/bin/node /opt/aimc-host/node_modules/aimc-host/dist/cli.js start");
+    expect(unit).toContain("ExecStart=/opt/aimc-host/bin/node /opt/aimc-host/node_modules/aimc-host/dist/cli.js start --service");
+    expect(unit).toContain("Environment=AIMC_SERVICE=1");
     expect(unit).toContain("User=ai-my-card-host");
     expect(unit).toContain("Environment=XDG_CONFIG_HOME=/var/lib/ai-my-card-host");
   });
@@ -19,6 +20,11 @@ describe("the systemd unit", () => {
     expect(unit).toContain("ProtectHome=yes");
     expect(unit).toContain("ProtectSystem=strict");
     expect(unit).toContain("WantedBy=multi-user.target");
+  });
+
+  it("keeps its run.json where status can read it without sudo", () => {
+    expect(unit).toContain("RuntimeDirectory=ai-my-card-host");
+    expect(unit).toContain("RuntimeDirectoryMode=0755");
   });
 });
 
@@ -83,7 +89,15 @@ describe("versions", () => {
   it("tells how to update, for the way the agent runs", () => {
     expect(updateCommand("0.3.0", {})).toBe("npm install -g aimc-host@0.3.0");
     expect(updateCommand("0.3.0", { npm_command: "exec" })).toBe("npx aimc-host@0.3.0 start");
-    expect(updateCommand("0.3.0", { INVOCATION_ID: "x" })).toContain("aimc-host install-service");
+    expect(updateCommand("0.3.0", { AIMC_SERVICE: "1" }, "linux")).toContain("aimc-host install-service");
+    expect(updateCommand("0.3.0", { AIMC_SERVICE: "1" }, "win32")).toContain("aimc-host stop, aimc-host start");
+  });
+
+  it("knows when it runs as the service, also under a unit written by 0.2", () => {
+    expect(runsAsService({ AIMC_SERVICE: "1" })).toBe(true);
+    expect(runsAsService({ INVOCATION_ID: "x", XDG_CONFIG_HOME: "/var/lib/ai-my-card-host" })).toBe(true);
+    // A desktop terminal can carry INVOCATION_ID too (it runs under a systemd user unit).
+    expect(runsAsService({ INVOCATION_ID: "x" })).toBe(false);
   });
 
   it("advises an update, or refuses to run below the server's minimum", () => {

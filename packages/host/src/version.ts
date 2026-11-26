@@ -41,11 +41,14 @@ export function compareVersions(a: string, b: string): number | null {
 
 /** Running under systemd (it sets INVOCATION_ID for every service it starts). */
 export function runsAsService(env: NodeJS.ProcessEnv = process.env): boolean {
-  return Boolean(env.INVOCATION_ID);
+  // AIMC_SERVICE=1: set by the unit and the Windows task. A unit written by 0.2 lacks it, but
+  // runs with systemd's INVOCATION_ID and the service's settings folder.
+  return env.AIMC_SERVICE === "1" || (Boolean(env.INVOCATION_ID) && env.XDG_CONFIG_HOME === "/var/lib/ai-my-card-host");
 }
 
 /** How to update to `version`, for the way this agent runs. */
-export function updateCommand(version: string, env: NodeJS.ProcessEnv = process.env): string {
+export function updateCommand(version: string, env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): string {
+  if (runsAsService(env) && platform === "win32") return `npm install -g ${PACKAGE_NAME}@${version}, then: ${PACKAGE_NAME} stop, ${PACKAGE_NAME} start`;
   if (runsAsService(env)) return `npm install -g ${PACKAGE_NAME}@${version}, then: ${PACKAGE_NAME} install-service`;
   if (env.npm_command === "exec") return `npx ${PACKAGE_NAME}@${version} start`;
   return `npm install -g ${PACKAGE_NAME}@${version}`;

@@ -60,10 +60,20 @@ aimc-host start
 
 While the host waits for approval, the agent says so and checks once a minute. Once approved it
 prints **Connected** and takes requests; each finished job shows one line (model, tokens, time).
-Ctrl+C stops it cleanly within a few seconds.
+Ctrl+C stops it cleanly within a few seconds; so does `aimc-host stop` from another terminal.
 
-`aimc-host status` shows your settings, Ollama, the GPU, whether the server is reachable, and
-your sign-in. `aimc-host help` lists every command.
+`aimc-host status` says first whether the agent runs, where (a terminal or the service), since
+when and how it is doing (connected, waiting for approval, paused, reconnecting; jobs done).
+Then your settings, Ollama, the GPU, whether the server is reachable, and your sign-in.
+`aimc-host help` lists every command.
+
+**One copy per host.** A second `aimc-host start` on the same machine is refused, and so is a
+second copy elsewhere (another machine with the same settings): the server lets one run of the
+agent connect per host. If the other copy was stopped a moment ago, the new one checks again for
+a minute before it gives up.
+
+**One host per machine.** `register` refuses when this machine already is one of your hosts and
+names it; use it with `aimc-host config --host-id <id>`, or add `--force` for a second host.
 
 ## Keep it running
 
@@ -81,7 +91,9 @@ It asks for your password (sudo), then:
 4. installs, enables and starts the unit `ai-my-card-host-agent` (started at boot, restarted
    30 s after a crash or a network problem).
 
-Then stop running `aimc-host start` yourself: one connection per host. Watch the service with
+From then on `aimc-host start` and `aimc-host stop` start and stop the service (through sudo),
+and `aimc-host status` shows it, no sudo needed. `aimc-host start --foreground` runs the agent in
+your terminal instead, once the service is stopped. Watch the service with
 `journalctl -u ai-my-card-host-agent -f`.
 
 Without `--copy-settings`, set the service up as the service itself:
@@ -90,8 +102,7 @@ Without `--copy-settings`, set the service up as the service itself:
 aimc-host service login --server https://your-server.example
 ```
 
-Then the same with `register --name ...` and `config --models ...`, and
-`sudo systemctl start ai-my-card-host-agent`. `aimc-host service status` shows the service's
+Then the same with `register --name ...` and `config --models ...`, and `aimc-host start`. `aimc-host service status` shows the service's
 settings and sign-in.
 
 `aimc-host install-service --dry-run` shows what it would do, without changing anything.
@@ -115,8 +126,9 @@ of `aimc-host`, or allow signed scripts for your user:
 npm install -g aimc-host@latest
 ```
 
-Then restart the agent. As a service, run `aimc-host install-service` again (it replaces the
-copy and restarts the service). Your sign-in and settings stay.
+Then restart the agent (`aimc-host stop`, then `aimc-host start`). As a service, run
+`aimc-host install-service` again (it replaces the copy and restarts the service). Your sign-in
+and settings stay.
 
 When the server recommends a newer agent, the agent says so once, with the command to run. When
 the server needs a newer one, the agent stops and says which version.
