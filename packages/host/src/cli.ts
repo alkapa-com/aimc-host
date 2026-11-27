@@ -6,11 +6,12 @@ import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { deviceLogin, fetchServerConfig, logout, NotSignedInError, readTokenClaims, tokenProblems, TokenSource } from "./auth.ts";
 import { AgentFiles, agentConfig, checkOllamaUrl, checkServerUrl, type AgentConfig } from "./config.ts";
-import { AlreadyRunningError, describeRun, describeState, liveRun, pidAlive, RunFile, stopRun, type RunInfo } from "./instance.ts";
+import { HostTokenSource, loadTokenSettings, readHostToken, type TokenSettings } from "./host-token.ts";
+import { AlreadyRunningError, describeRun, describeState, liveRun, pidAlive, RunFile, stopRun, type RunInfo, type RunMode } from "./instance.ts";
 import { machineId } from "./machine.ts";
 import { OllamaClient } from "./ollama.ts";
 import { FatalError, Runner } from "./runner.ts";
-import { ServerClient, ServerError } from "./server-client.ts";
+import { ServerClient, ServerError, type AccessTokens } from "./server-client.ts";
 import {
   controlLinuxService,
   installService,
@@ -23,7 +24,7 @@ import {
 } from "./service.ts";
 import { claimSupervisor, closeLog, liveSupervisor, LOG_FILE, logTail, openLog, releaseSupervisor, spawnAgent, stamp, startDetachedSupervisor, supervise } from "./supervisor.ts";
 import { readGpu } from "./telemetry.ts";
-import { AGENT_VERSION, PACKAGE_NAME, runsAsService } from "./version.ts";
+import { AGENT_VERSION, PACKAGE_NAME, runsAsService, runsInContainer } from "./version.ts";
 import { currentUser, deleteTask, registerTask, TASK_NAME, taskArguments, taskInputs, taskState } from "./windows-service.ts";
 
 // aimc-host: lend your GPU to an aimc server. Run: aimc-host <command> (or npx aimc-host ...).
@@ -61,8 +62,12 @@ As a service (Linux: systemd, asks for sudo; Windows: a task that starts it hidd
   service <command>         Linux: run a command as the service, e.g. service status
   uninstall-service         remove the service (Linux --purge: its sign-in and settings too)
 
+With a host token (made on the website for one host) instead of login and register,
+e.g. in a container: set AIMC_SERVER_URL, AIMC_HOST_TOKEN (or AIMC_HOST_TOKEN_FILE) and
+AIMC_MODELS, optionally AIMC_OLLAMA_URL and AIMC_MAX_CONCURRENT, then run start.
+
 Settings and the sign-in live in ${new AgentFiles().dir}
-The sign-in file (credentials.json) is a secret: anyone with it can act as this host.`;
+The sign-in file (credentials.json) and a host token are secrets: anyone with them can act as this host.`;
 
 // With dates in agent.log (the Windows service); the terminal and the journal need only the time.
 const log = (message: string) => console.log(`${process.env.AIMC_LOG_DATES ? stamp() : new Date().toISOString().slice(11, 19)} ${message}`);
@@ -230,13 +235,39 @@ async function stopWindowsService(files: AgentFiles): Promise<boolean> {
   return stopped;
 }
 
-function requireServer(config: AgentConfig): string {
-  if (!config.serverUrl) throw new Error(`No server set. Run: ${RUN} login --server https://your-server.example`);
+function requireServer(config: AgentConfig, tokenMode = false): string {
+  if (!config.serverUrl) {
+    throw new Error(tokenMode ? "No server set. Set AIMC_SERVER_URL=https://your-server.example" : `No server set. Run: ${RUN} login --server https://your-server.example`);
+  }
   return config.serverUrl;
 }
 
+/** Commands that don't apply with a host token: why, and what to do instead. */
+function notWithToken(command: string): Error {
+  return new Error(
+    `${command} isn't needed with a host token (AIMC_HOST_TOKEN or AIMC_HOST_TOKEN_FILE is set): the website made the host and the token names it. ` +
+      `Unset them to use ${command}.`,
+  );
+}
+
+/** How `start` authenticates: the sign-in from `login`, or a host token. */
+interface StartAuth {
+  tokens: AccessTokens;
+  hostToken?: HostTokenSource;
+  /** Hashed machine id for hello; not in token mode (a container's machine id says nothing). */
+  machineId?: string;
+  /** For the log, e.g. "with host token aimc_host_ab…". */
+  describe?: string;
+}
+
+function hostTokenAuth(settings: TokenSettings): StartAuth {
+  const file = settings.file;
+  const source = new HostTokenSource(settings.token, file ? () => readHostToken({ AIMC_HOST_TOKEN_FILE: file }).token : null);
+  return { tokens: source, hostToken: source, describe: `with host token ${source.hint()} (from ${settings.from})` };
+}
+
 /** `start`, once this run holds the run folder: the agent until Ctrl+C, `stop` or a fatal error. */
-async function runAgent(server: string, config: AgentConfig, hostId: string, files: AgentFiles, run: RunFile, runId: string, asService: boolean): Promise<number> {
+async function runAgent(server: string, config: AgentConfig, hostId: string, auth: StartAuth, run: RunFile, runId: string, asService: boolean): Promise<number> {
   const stop = new AbortController();
   const onStop = (why: string) => {
     if (stop.signal.aborted) return;
@@ -271,9 +302,9 @@ async function runAgent(server: string, config: AgentConfig, hostId: string, fil
   }
   const missing = config.models.filter((m) => !installed.includes(m));
   if (missing.length) log(`Warning: offered but not installed in Ollama: ${missing.join(", ")}. Jobs for them will fail.`);
-  log(`Starting host ${hostId} against ${server}.`);
+  log(`Starting host ${hostId} against ${server}${auth.describe ? ` ${auth.describe}` : ""}.`);
   await new Runner({
-    server: new ServerClient(fetch, server, new TokenSource(fetch, files), runId),
+    server: new ServerClient(fetch, server, auth.tokens, runId),
     ollama,
     hostId,
     models: config.models,
@@ -282,7 +313,8 @@ async function runAgent(server: string, config: AgentConfig, hostId: string, fil
     readGpu,
     log,
     signal: stop.signal,
-    machineId: machineId(),
+    ...(auth.machineId ? { machineId: auth.machineId } : {}),
+    ...(auth.hostToken ? { hostToken: auth.hostToken } : {}),
     onState: (state, detail) => run.update(state, detail),
     onJobDone: () => run.jobDone(),
   }).run();
@@ -329,11 +361,23 @@ async function main(argv: string[]): Promise<number> {
   if (positionals.length > (command === "login" ? 1 : 0)) {
     throw new Error(`Unexpected argument '${positionals.at(-1)}'. Options start with --, e.g. --models a,b. See: ${RUN} help`);
   }
+  if (command === undefined || command === "help" || command === "--help" || command === "-h") {
+    console.log(HELP);
+    return 0;
+  }
+  if (command === "version" || command === "--version" || command === "-v") {
+    console.log(`${PACKAGE_NAME} ${AGENT_VERSION} (protocol ${PROTOCOL_VERSION}, Node ${process.version})`);
+    return 0;
+  }
   const files = new AgentFiles();
-  const config = await files.loadConfig();
+  const fileConfig = await files.loadConfig();
+  // Host token mode: the token and the AIMC_* variables, on top of config.json.
+  const tokenMode = loadTokenSettings(process.env, fileConfig);
+  const config: AgentConfig = tokenMode?.config ?? fileConfig;
 
   switch (command) {
     case "login": {
+      if (tokenMode) throw notWithToken("login");
       const serverArg = values.server ?? positionals[0];
       if (serverArg) config.serverUrl = checkServerUrl(serverArg);
       const server = requireServer(config);
@@ -355,6 +399,8 @@ async function main(argv: string[]): Promise<number> {
     }
 
     case "config": {
+      // Changes config.json only; in host token mode the AIMC_* variables win over it.
+      const config = fileConfig;
       let changed = false;
       if (values.server) {
         config.serverUrl = checkServerUrl(values.server);
@@ -388,6 +434,7 @@ async function main(argv: string[]): Promise<number> {
         console.log(running ? `Saved. The agent is running (${describeRun(running)}): ${RUN} stop, then ${RUN} start, to apply.` : "Saved.");
       }
       console.log(JSON.stringify(config, null, 2));
+      if (tokenMode) console.log("Host token mode: the AIMC_* variables in the environment win over these settings; `status` shows what the agent uses.");
       if (values.models !== undefined) {
         const installed = await new OllamaClient(fetch, config.ollamaUrl).installed().catch(() => null);
         const missing = installed ? config.models.filter((m) => !installed.includes(m)) : [];
@@ -397,6 +444,7 @@ async function main(argv: string[]): Promise<number> {
     }
 
     case "register": {
+      if (tokenMode) throw notWithToken("register");
       const server = requireServer(config);
       if (!values.name) throw new Error("Give the host a name: register --name my-desktop");
       if (config.hostId && !values.force) {
@@ -413,7 +461,9 @@ async function main(argv: string[]): Promise<number> {
     }
 
     case "start": {
-      const asService = Boolean(values.service) || runsAsService();
+      const inContainer = runsInContainer();
+      // In a container, too, the agent waits for Ollama instead of giving up.
+      const asService = Boolean(values.service) || runsAsService() || inContainer;
       if (asService) process.env.AIMC_SERVICE = "1";
       // Windows: the task runs `start --service`, which starts the hidden supervisor and ends;
       // the supervisor starts the agent (this command, once more) and starts it again after a crash.
@@ -422,7 +472,8 @@ async function main(argv: string[]): Promise<number> {
         startDetachedSupervisor();
         return 0;
       }
-      const service = asService ? null : await installedService(files);
+      // With a host token, `start` runs here: the installed service runs with its own sign-in.
+      const service = asService || tokenMode ? null : await installedService(files);
 
       // The service is installed: `start` starts it (unless asked to run here).
       if (service && !values.foreground) {
@@ -439,16 +490,24 @@ async function main(argv: string[]): Promise<number> {
         throw new Error(`The service is already running this host${service.run ? ` (${describeRun(service.run)})` : ""}. Stop it first: ${RUN} stop`);
       }
 
-      const server = requireServer(config);
+      const server = requireServer(config, Boolean(tokenMode));
       if (!config.hostId) throw new Error(`Not registered yet. Run: ${RUN} register --name <name>`);
-      if (config.models.length === 0) throw new Error(`No models offered. Run: ${RUN} config --models gemma3:12b`);
+      if (config.models.length === 0) {
+        throw new Error(
+          tokenMode
+            ? "No models offered. Set AIMC_MODELS to the Ollama models you offer, e.g. AIMC_MODELS=gemma3:12b,llama3.2:3b"
+            : `No models offered. Run: ${RUN} config --models gemma3:12b`,
+        );
+      }
+      const mode: RunMode = inContainer ? "container" : asService ? "service" : "terminal";
+      const auth: StartAuth = tokenMode ? hostTokenAuth(tokenMode) : { tokens: new TokenSource(fetch, files), machineId: machineId() };
       const runId = randomUUID();
       let run: RunFile;
       try {
         run = await RunFile.acquire(runDir(files, asService), {
           pid: process.pid,
           runId,
-          mode: asService ? "service" : "terminal",
+          mode,
           hostId: config.hostId,
           version: AGENT_VERSION,
         });
@@ -460,7 +519,7 @@ async function main(argv: string[]): Promise<number> {
         throw err;
       }
       try {
-        return await runAgent(server, config, config.hostId, files, run, runId, asService);
+        return await runAgent(server, config, config.hostId, auth, run, runId, asService);
       } finally {
         await run.release();
       }
@@ -506,7 +565,7 @@ async function main(argv: string[]): Promise<number> {
       if (service?.kind === "systemd") console.log(`Service:   installed, ${service.state}; it has its own settings (${RUN} service status)`);
       if (service?.kind === "task") console.log(`Service:   installed (Windows task "${TASK_NAME}", starts it when you log in); log: ${service.log}`);
       console.log(`Agent:     ${PACKAGE_NAME} ${AGENT_VERSION}`);
-      console.log(`Settings:  ${files.dir}`);
+      console.log(`Settings:  ${files.dir}${tokenMode ? ", with the AIMC_* variables from the environment on top" : ""}`);
       console.log(`Server:    ${config.serverUrl ?? "not set"}`);
       console.log(`Host id:   ${config.hostId ?? "not registered"}`);
       console.log(`Offering:  ${config.models.join(", ") || "nothing"} (up to ${config.maxConcurrent} at once)`);
@@ -528,7 +587,10 @@ async function main(argv: string[]): Promise<number> {
           console.log(`Server:    ${(err as Error).message}`);
         }
       }
-      if (!(await files.loadCredentials())) console.log(`Sign-in:   not signed in (${RUN} login --server <url>)`);
+      if (tokenMode) {
+        const from = tokenMode.file ? `AIMC_HOST_TOKEN_FILE ${tokenMode.file}` : "AIMC_HOST_TOKEN";
+        console.log(`Sign-in:   host token ${new HostTokenSource(tokenMode.token).hint()} from ${from}; the server checks it when the agent connects`);
+      } else if (!(await files.loadCredentials())) console.log(`Sign-in:   not signed in (${RUN} login --server <url>)`);
       else {
         try {
           const claims = readTokenClaims(await new TokenSource(fetch, files).get());
@@ -554,23 +616,16 @@ async function main(argv: string[]): Promise<number> {
     }
 
     case "install-service":
+      if (tokenMode) {
+        throw new Error(
+          "install-service runs the agent with your sign-in (login), not with a host token: the service doesn't get this environment. " +
+            "With a host token, use the Docker image, or run `aimc-host start` from your own service manager with the AIMC_* variables set.",
+        );
+      }
       return process.platform === "win32" ? installWindowsService(files, config, serviceOptions) : installService(serviceOptions);
 
     case "uninstall-service":
       return process.platform === "win32" ? uninstallWindowsService(files, serviceOptions) : uninstallService(serviceOptions);
-
-    case "version":
-    case "--version":
-    case "-v":
-      console.log(`${PACKAGE_NAME} ${AGENT_VERSION} (protocol ${PROTOCOL_VERSION}, Node ${process.version})`);
-      return 0;
-
-    case undefined:
-    case "help":
-    case "--help":
-    case "-h":
-      console.log(HELP);
-      return 0;
 
     default:
       console.error(`Unknown command: ${command}\n\n${HELP}`);

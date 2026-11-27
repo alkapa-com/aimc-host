@@ -9,11 +9,21 @@ import {
   type HelloRequest,
   type HelloResponse,
 } from "aimc-protocol/agent";
-import type { FetchFn, TokenSource } from "./auth.ts";
+import type { FetchFn } from "./auth.ts";
 
 // Calls to the server's agent API. Every call carries a fresh access token; a 401 refreshes the
-// token once and retries (it may have expired a moment ago). With a run id, every call says
-// which run of the agent it is (one copy per host: the server refuses a second run).
+// token once and retries (it may have expired a moment ago). A host token can't be refreshed:
+// its 401 is final. With a run id, every call says which run of the agent it is (one copy per
+// host: the server refuses a second run).
+
+/** Where the bearer token comes from: the sign-in (TokenSource) or a host token. */
+export interface AccessTokens {
+  get(): Promise<string>;
+  /** The server refused the token. */
+  invalidate(): void;
+  /** False for a host token: a refused one won't get better by asking again at once. */
+  readonly refreshable: boolean;
+}
 
 /** The server answered with an error: a fixed code and a message written for you. */
 export class ServerError extends Error {
@@ -31,10 +41,10 @@ export class ServerError extends Error {
 export class ServerClient {
   private readonly fetchFn: FetchFn;
   private readonly serverUrl: string;
-  private readonly tokens: TokenSource;
+  private readonly tokens: AccessTokens;
   private readonly runId: string | undefined;
 
-  constructor(fetchFn: FetchFn, serverUrl: string, tokens: TokenSource, runId?: string) {
+  constructor(fetchFn: FetchFn, serverUrl: string, tokens: AccessTokens, runId?: string) {
     this.fetchFn = fetchFn;
     this.serverUrl = serverUrl;
     this.tokens = tokens;
@@ -49,7 +59,7 @@ export class ServerClient {
         headers: { ...(init.headers as Record<string, string>), authorization: `Bearer ${token}`, ...(this.runId ? { [AGENT_RUN_HEADER]: this.runId } : {}) },
         ...(timeoutMs !== null && !init.signal ? { signal: AbortSignal.timeout(timeoutMs) } : {}),
       });
-      if (res.status === 401 && attempt === 0) {
+      if (res.status === 401 && attempt === 0 && this.tokens.refreshable) {
         this.tokens.invalidate();
         continue;
       }

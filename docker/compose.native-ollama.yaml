@@ -1,0 +1,32 @@
+# Only the agent in Docker; Ollama runs natively on the machine (the Ollama app). For a Mac
+# (Docker can't use its GPU), or Windows and Linux machines that already run Ollama.
+# See README.md in this folder.
+#
+#   docker compose -f compose.native-ollama.yaml up -d
+
+services:
+  agent:
+    image: alkapa/aimc-host:latest
+    restart: unless-stopped
+    environment:
+      AIMC_SERVER_URL: https://your-server.example
+      AIMC_HOST_TOKEN_FILE: /run/secrets/aimc_host_token
+      # Docker Desktop (Mac, Windows): host.docker.internal is the machine itself, and reaches
+      # an Ollama that listens only on 127.0.0.1. On Linux, see network_mode below.
+      AIMC_OLLAMA_URL: http://host.docker.internal:11434
+      AIMC_MODELS: gemma3:12b
+      AIMC_MAX_CONCURRENT: "1"
+    secrets:
+      - aimc_host_token
+    volumes:
+      - agent:/config
+    # Linux: Ollama listens on 127.0.0.1, which a container can't reach. Share the machine's
+    # network instead, and use AIMC_OLLAMA_URL: http://127.0.0.1:11434
+    # network_mode: host
+
+secrets:
+  aimc_host_token:
+    file: ./aimc-host-token
+
+volumes:
+  agent:

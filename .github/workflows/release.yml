@@ -1,7 +1,8 @@
 name: Release
 
 # Publishes to npm every package whose version isn't there yet, with provenance (npm shows
-# that the package was built here, from this commit).
+# that the package was built here, from this commit). Then builds the Docker image of the agent
+# (linux/amd64 and linux/arm64) and pushes it to Docker Hub as <version> and latest.
 #
 # How to release: bump "version" in packages/*/package.json (and CHANGELOG.md), merge to main,
 # then create a GitHub release (tag v<host version>), or run this workflow by hand.
@@ -9,6 +10,11 @@ name: Release
 # Authentication: npm trusted publishing (OIDC), no token stored. Before a package exists on
 # npm, trusted publishing can't be set up for it; for that first release only, add a short-lived
 # granular npm token as the secret NPM_TOKEN, then delete it.
+#
+# Docker Hub: the job `docker` runs only once the repository variable DOCKERHUB_USERNAME is set.
+# It needs, in the GitHub environment `docker`, the secret DOCKERHUB_TOKEN: a Docker Hub
+# personal access token with Read & Write access, for that user. The image name is the variable
+# DOCKERHUB_IMAGE (default alkapa/aimc-host). See docker/README.md and the root README.
 
 on:
   release:
@@ -39,3 +45,41 @@ jobs:
       - run: node scripts/publish.mjs
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  docker:
+    needs: publish
+    if: ${{ vars.DOCKERHUB_USERNAME != '' }}
+    runs-on: ubuntu-latest
+    environment: docker
+    permissions:
+      contents: read
+    env:
+      IMAGE: ${{ vars.DOCKERHUB_IMAGE || 'alkapa/aimc-host' }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Tags
+        id: tags
+        run: |
+          version=$(node -p "require('./packages/host/package.json').version")
+          tags="$IMAGE:$version"
+          # A pre-release (0.6.0-beta.1) doesn't move latest.
+          case "$version" in *-*) ;; *) tags="$tags,$IMAGE:latest" ;; esac
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tags=$tags" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          build-args: |
+            IMAGE=${{ env.IMAGE }}
+            VERSION=${{ steps.tags.outputs.version }}
+          provenance: mode=max
+          sbom: true

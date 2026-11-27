@@ -1,0 +1,51 @@
+# The aimc host agent next to Ollama, on a machine with an NVIDIA GPU (Linux, or Windows with
+# Docker Desktop and WSL 2). See README.md in this folder.
+#
+#   1. On the website: Hosts, "Add a host with a token". Save the token in a file named
+#      aimc-host-token next to this file (one line; it is shown only once).
+#   2. Set AIMC_SERVER_URL and AIMC_MODELS below, then: docker compose up -d
+#   3. Pull the models you offer: docker compose exec ollama ollama pull gemma3:12b
+#   4. An admin approves the host on the website; the agent starts taking jobs by itself.
+#
+# Logs: docker compose logs -f agent      Status: docker compose exec agent aimc-host status
+
+services:
+  ollama:
+    # Pin a version you have tested if you like, e.g. ollama/ollama:<version>.
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    gpus: all
+    volumes:
+      - ollama:/root/.ollama
+    # No ports: only the agent calls Ollama, over this compose network. Ollama has no
+    # authentication; never publish 11434 to the internet.
+
+  agent:
+    # Or pin a version: alkapa/aimc-host:0.5.0. The agent says when a newer one is out.
+    image: alkapa/aimc-host:latest
+    restart: unless-stopped
+    depends_on:
+      - ollama
+    environment:
+      AIMC_SERVER_URL: https://your-server.example
+      AIMC_HOST_TOKEN_FILE: /run/secrets/aimc_host_token
+      AIMC_OLLAMA_URL: http://ollama:11434
+      # The Ollama models you offer, comma-separated, as `ollama list` names them.
+      AIMC_MODELS: gemma3:12b
+      AIMC_MAX_CONCURRENT: "1"
+    secrets:
+      - aimc_host_token
+    volumes:
+      - agent:/config
+    # Optional: lets the agent read the GPU's name, memory, load and temperature (nvidia-smi)
+    # for the website. Remove it and the agent works the same, without GPU details.
+    gpus: all
+
+secrets:
+  aimc_host_token:
+    # The agent runs as user id 1000: on Linux, `sudo chown 1000 aimc-host-token && chmod 600 aimc-host-token`.
+    file: ./aimc-host-token
+
+volumes:
+  ollama:
+  agent:

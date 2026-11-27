@@ -1,0 +1,47 @@
+# The aimc host agent next to Ollama, on Linux with an AMD GPU (ROCm). See README.md in this folder;
+# the steps are the same as for compose.yaml:
+#
+#   docker compose -f compose.amd.yaml up -d
+#   docker compose -f compose.amd.yaml exec ollama ollama pull gemma3:12b
+
+services:
+  ollama:
+    image: ollama/ollama:rocm
+    restart: unless-stopped
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    # Some distributions need the GPU groups too; uncomment if Ollama finds no GPU:
+    # group_add:
+    #   - video
+    #   - render
+    # For a card ROCm doesn't list officially, Ollama's docs describe HSA_OVERRIDE_GFX_VERSION:
+    # environment:
+    #   HSA_OVERRIDE_GFX_VERSION: "10.3.0"
+    volumes:
+      - ollama:/root/.ollama
+
+  agent:
+    image: alkapa/aimc-host:latest
+    restart: unless-stopped
+    depends_on:
+      - ollama
+    environment:
+      AIMC_SERVER_URL: https://your-server.example
+      AIMC_HOST_TOKEN_FILE: /run/secrets/aimc_host_token
+      AIMC_OLLAMA_URL: http://ollama:11434
+      AIMC_MODELS: gemma3:12b
+      AIMC_MAX_CONCURRENT: "1"
+    secrets:
+      - aimc_host_token
+    volumes:
+      - agent:/config
+    # No GPU details on the website for AMD yet (the agent reads them with nvidia-smi).
+
+secrets:
+  aimc_host_token:
+    file: ./aimc-host-token
+
+volumes:
+  ollama:
+  agent:

@@ -1,6 +1,7 @@
 import { parseStreamEvent, PROTOCOL_VERSION, type AgentJobEvent, type JobEvent } from "aimc-protocol/agent";
 import { readSseData } from "aimc-protocol/sse";
 import { NotSignedInError } from "./auth.ts";
+import type { HostTokenSource } from "./host-token.ts";
 import type { RunState } from "./instance.ts";
 import { OllamaError, type OllamaClient } from "./ollama.ts";
 import { ServerError, type ServerClient } from "./server-client.ts";
@@ -61,6 +62,12 @@ export interface RunnerOptions {
   /** Another copy holds the host: how long to keep checking (it may have just stopped) before giving up. */
   conflictGraceMs?: number;
   conflictRetryMs?: number;
+  /** Host token mode: the token (the server may refuse it; the owner can make a new one). */
+  hostToken?: HostTokenSource;
+  /** After the server refused the host token: how long until trying it again... */
+  tokenRetryMs?: number;
+  /** ...and how often to look for a new token in the token file meanwhile. */
+  tokenCheckMs?: number;
 }
 
 const sleep = (ms: number, signal: AbortSignal) =>
@@ -131,6 +138,10 @@ export class Runner {
           if (signal.aborted) break;
           if (err instanceof NotSignedInError || err instanceof FatalError) throw err;
           if (err instanceof ServerError) {
+            if (err.status === 401 && this.o.hostToken) {
+              await this.tokenRefused(err);
+              continue;
+            }
             if (FATAL.has(err.code)) throw new FatalError(err.message);
             if (err.code === "host_already_connected") {
               // Two copies of one host. Maybe the other one was stopped a moment ago and the
@@ -164,6 +175,32 @@ export class Runner {
       for (const job of this.jobs.values()) {
         job.reason = "cancelled";
         job.abort.abort();
+      }
+    }
+  }
+
+  /**
+   * The server refused the host token: it was replaced by a new one, deleted with its host, or
+   * mistyped. Says so once, then waits (reading the token file again every half minute, when
+   * there is one) and tries again: the owner may be about to fix it.
+   */
+  private async tokenRefused(err: ServerError) {
+    const token = this.o.hostToken!;
+    const retryMs = this.o.tokenRetryMs ?? 300_000;
+    const checkMs = Math.min(this.o.tokenCheckMs ?? 30_000, retryMs);
+    this.o.onState?.("token_refused", err.code);
+    const fix = token.canReload
+      ? "put it into the token file (the agent reads the file again every half minute)"
+      : "set AIMC_HOST_TOKEN to it and restart the agent";
+    this.notice(
+      `The server refused the host token ${token.hint()} (${err.code}: ${err.message}) Make a new token for this host on the website (Hosts, New token) and ${fix}. Trying again every ${Math.round(retryMs / 60_000)} min.`,
+    );
+    for (let waited = 0; waited < retryMs && !this.o.signal.aborted; waited += checkMs) {
+      await sleep(checkMs, this.o.signal);
+      if (token.reload()) {
+        this.o.log(`Read a new host token ${token.hint()} from the token file; trying it.`);
+        this.lastNotice = "";
+        return;
       }
     }
   }

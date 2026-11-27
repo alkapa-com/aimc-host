@@ -16,7 +16,7 @@ export function configDir(env: NodeJS.ProcessEnv = process.env, platform: NodeJS
 
 export const DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434";
 
-const MODEL_NAME = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,99}$/;
+export const MODEL_NAME = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,99}$/;
 
 export const agentConfig = z.object({
   serverUrl: z.string().optional(),

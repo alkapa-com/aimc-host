@@ -27,3 +27,17 @@ jobs:
       - run: npm test
       - run: npm run build
       - run: node scripts/smoke.mjs
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: docker build --build-arg VERSION=ci -t aimc-host:ci .
+      - run: docker run --rm aimc-host:ci version
+      # A misconfigured container says what's wrong, without the token, and exits 1.
+      - run: |
+          set +e
+          out=$(docker run --rm -e AIMC_HOST_TOKEN=aimc_host_not-a-token-secret aimc-host:ci 2>&1)
+          code=$?
+          echo "$out"
+          [ "$code" = 1 ] && echo "$out" | grep -q "That isn't a host token" && ! echo "$out" | grep -q "not-a-token-secret"

@@ -146,6 +146,7 @@ export class NotSignedInError extends Error {
  * refresh token with each refresh ("rotation"); it is saved at once, so a restart keeps working.
  */
 export class TokenSource {
+  readonly refreshable = true;
   private readonly fetchFn: FetchFn;
   private readonly files: AgentFiles;
   private creds: Credentials | null = null;

@@ -46,8 +46,16 @@ export function runsAsService(env: NodeJS.ProcessEnv = process.env): boolean {
   return env.AIMC_SERVICE === "1" || (Boolean(env.INVOCATION_ID) && env.XDG_CONFIG_HOME === "/var/lib/ai-my-card-host");
 }
 
+/** Running from the Docker image (it sets AIMC_CONTAINER=1). */
+export function runsInContainer(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.AIMC_CONTAINER === "1";
+}
+
 /** How to update to `version`, for the way this agent runs. */
 export function updateCommand(version: string, env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): string {
+  if (runsInContainer(env)) {
+    return `use the image ${env.AIMC_IMAGE || "alkapa/aimc-host"}:${version} (or :latest) and recreate the container, e.g. docker compose pull && docker compose up -d`;
+  }
   if (runsAsService(env) && platform === "win32") return `npm install -g ${PACKAGE_NAME}@${version}, then: ${PACKAGE_NAME} stop, ${PACKAGE_NAME} start`;
   if (runsAsService(env)) return `npm install -g ${PACKAGE_NAME}@${version}, then: ${PACKAGE_NAME} install-service`;
   if (env.npm_command === "exec") return `npx ${PACKAGE_NAME}@${version} start`;

@@ -5,3 +5,6 @@ dist/
 coverage/
 .env
 .env.*
+
+# A host token for the Docker examples (docker/README.md)
+aimc-host-token

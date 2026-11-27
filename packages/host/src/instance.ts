@@ -12,8 +12,17 @@ import { join } from "node:path";
 //
 // No secrets in here: pid, run id, host id, state, times.
 
-export type RunState = "starting" | "waiting_for_ollama" | "connected" | "reconnecting" | "waiting_for_approval" | "paused" | "blocked" | "stopping";
-export type RunMode = "terminal" | "service";
+export type RunState =
+  | "starting"
+  | "waiting_for_ollama"
+  | "connected"
+  | "reconnecting"
+  | "waiting_for_approval"
+  | "paused"
+  | "blocked"
+  | "token_refused"
+  | "stopping";
+export type RunMode = "terminal" | "service" | "container";
 
 export interface RunInfo {
   pid: number;
@@ -75,6 +84,15 @@ function looksLikeAgent(pid: number): boolean {
   }
 }
 
+/**
+ * A run file with our pid, written before this process started: an earlier run of this
+ * container (the agent has the same pid in every run, and the settings folder is a volume that
+ * outlives a crash), not a second copy.
+ */
+export function earlierLifeOfThisPid(info: RunInfo, pid = process.pid, startedAt = Date.now() - process.uptime() * 1000): boolean {
+  return info.pid === pid && Date.parse(info.startedAt) < startedAt - 1000;
+}
+
 /** Is the agent of this run file still running? */
 export function isAlive(info: RunInfo, now = Date.now()): boolean {
   if (!pidAlive(info.pid)) return false;
@@ -108,7 +126,8 @@ function since(iso: string, now = Date.now()): string {
 }
 
 export function describeRun(info: RunInfo, now = Date.now()): string {
-  return `${info.mode === "service" ? "as the service" : "in a terminal"}, pid ${info.pid}, for ${since(info.startedAt, now)}`;
+  const where = info.mode === "service" ? "as the service" : info.mode === "container" ? "in a container" : "in a terminal";
+  return `${where}, pid ${info.pid}, for ${since(info.startedAt, now)}`;
 }
 
 const STATE_TEXT: Record<RunState, string> = {
@@ -119,6 +138,7 @@ const STATE_TEXT: Record<RunState, string> = {
   waiting_for_approval: "waiting for an admin to approve this host",
   paused: "paused (resume it on the website)",
   blocked: "refused: another copy of this host is connected",
+  token_refused: "the server refused the host token; make a new one on the website",
   stopping: "stopping",
 };
 
@@ -159,7 +179,7 @@ export class RunFile {
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
         const other = await readRun(dir);
-        if (other && isAlive(other)) throw new AlreadyRunningError(other);
+        if (other && !earlierLifeOfThisPid(other) && isAlive(other)) throw new AlreadyRunningError(other);
         // Left behind by an agent that crashed or was killed: take it over.
         await rm(path, { force: true });
       }

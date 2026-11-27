@@ -75,6 +75,33 @@ a minute before it gives up.
 **One host per machine.** `register` refuses when this machine already is one of your hosts and
 names it; use it with `aimc-host config --host-id <id>`, or add `--force` for a second host.
 
+## With a host token (Docker and other unattended setups)
+
+Instead of `login` and `register`, the agent can run with a **host token**: made on the website
+(Hosts, **Add a host with a token**, or **New token** on an existing host), shown once, valid for
+that one host until you make a new one. A new host still waits for an admin's approval.
+
+The ready-made way is the Docker image `alkapa/aimc-host`, next to an Ollama container:
+see [docker/README.md](https://github.com/alkapa-com/aimc-host/tree/main/docker#readme), with
+compose files for NVIDIA, AMD (ROCm), Windows and Mac.
+
+The installed CLI works the same way: set these and run `aimc-host start`.
+
+| Variable | |
+|---|---|
+| `AIMC_SERVER_URL` | the server, `https://...` |
+| `AIMC_HOST_TOKEN_FILE` | a file holding the token (wins over `AIMC_HOST_TOKEN`) |
+| `AIMC_HOST_TOKEN` | the token itself |
+| `AIMC_MODELS` | the models you offer, comma-separated |
+| `AIMC_OLLAMA_URL` | your Ollama (default `http://127.0.0.1:11434`) |
+| `AIMC_MAX_CONCURRENT` | jobs at once, 1 to 32 (default 1) |
+
+Each variable wins over the same setting in `config.json`; the host is the one the token names.
+`login`, `register` and `install-service` are refused while a token is set. The agent prints only
+the token's start (`aimc_host_` and 8 characters of the host id), as the website shows it. If the server refuses the token, the agent says so once and
+tries again every 5 minutes; with `AIMC_HOST_TOKEN_FILE`, it also reads the file again every 30
+seconds, so putting a new token there is enough.
+
 ## Keep it running
 
 ### Linux (systemd)
@@ -161,7 +188,7 @@ aimc-host logout
 
 It revokes the sign-in at the sign-in server, then deletes it from this machine.
 
-## Your sign-in is a secret
+## Your sign-in (and a host token) is a secret
 
 `login` stores a long-lived sign-in (an OAuth refresh token) in `credentials.json`:
 
@@ -174,6 +201,9 @@ It revokes the sign-in at the sign-in server, then deletes it from this machine.
 Anyone with that file can act as your host. Don't copy it around, don't commit it; if it
 leaked, run `aimc-host logout` (or ask the admin to revoke it). It ends by itself when unused
 for 30 days.
+
+The same goes for a host token. If one leaked, make a new token for the host on the website:
+the old one stops working at once.
 
 ## Troubleshooting
 
