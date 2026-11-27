@@ -1,22 +1,21 @@
 # Changelog
 
-## aimc-host 0.5.0 (unreleased)
+## aimc-host 0.5.0 (2026-11-27)
 
 - Host token mode: with a token made on the website for one host, the agent runs without
   `login` and `register`. Settings from the environment: `AIMC_SERVER_URL`, `AIMC_HOST_TOKEN` or
   `AIMC_HOST_TOKEN_FILE` (the file wins), `AIMC_MODELS`, `AIMC_OLLAMA_URL`,
   `AIMC_MAX_CONCURRENT`; each wins over `config.json`. The token is sent as a bearer token on the
-  same agent API; only its start (`aimc_host_` and 8 characters of the host id, as the website shows it) is
-  ever printed. No machine id is sent in this
-  mode.
+  same agent API; only its start (`aimc_host_` and 8 characters of the host id, as the website
+  shows it) is ever printed. No machine id is sent in this mode.
 - A refused host token (401) is not retried at once: the agent says so once, then tries again
   every 5 minutes, and picks up a new token from `AIMC_HOST_TOKEN_FILE` within 30 seconds. A
   stream the server closes (after an hour with a token, or at once when the token is replaced)
-  is reopened as before.
-  `status` shows the state "the server refused the host token".
-- The Docker image `alkapa/aimc-host` (linux/amd64, linux/arm64): the agent only, as a non-root
-  user, `aimc-host start` in the foreground, logs to stdout, settings volume `/config`, a health
+  is reopened as before. `status` shows the state "the server refused the host token".
+- A `Dockerfile` for an agent-only image (linux/amd64, linux/arm64): a non-root user,
+  `aimc-host start` in the foreground, logs to stdout, settings volume `/config`, a health
   check. Compose examples for NVIDIA, AMD (ROCm) and native Ollama (Mac, Windows) in `docker/`.
+  The release workflow pushes it to Docker Hub as `alkapa/aimc-host` once that is set up.
 - In a container the agent waits for Ollama, its update hint says to pull the new image, and a
   restarted container takes over the run file its earlier run left behind.
 - `help` and `version` work even when the settings are broken.
